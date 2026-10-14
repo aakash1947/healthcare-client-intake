@@ -1,0 +1,12 @@
+import {list,get} from '@vercel/blob';import ExcelJS from 'exceljs';import crypto from 'node:crypto';import {sections} from '../src/fields.js';
+function authorized(req){const key=process.env.INTAKE_ADMIN_KEY;const supplied=(req.headers.authorization||'').replace(/^Bearer /i,'');if(!key||!supplied)return false;const a=Buffer.from(key),b=Buffer.from(supplied);return a.length===b.length&&crypto.timingSafeEqual(a,b)}
+export default async function handler(req,res){
+ if(req.method!=='GET')return res.status(405).json({error:'Method not allowed'});
+ if(!authorized(req))return res.status(401).json({error:'Unauthorized'});
+ if(!process.env.BLOB_READ_WRITE_TOKEN)return res.status(503).json({error:'Storage not configured'});
+ try{const wb=new ExcelJS.Workbook();const ws=wb.addWorksheet('Client Requirements');
+ const fields=sections.flatMap(s=>s.fields);ws.columns=[{header:'Reference',key:'reference',width:22},{header:'Submitted At (UTC)',key:'submittedAt',width:27},...fields.map(f=>({header:f.label,key:f.key,width:36}))];ws.getRow(1).font={bold:true};ws.views=[{state:'frozen',ySplit:1}];ws.autoFilter={from:'A1',to:{row:1,column:fields.length+2}};
+ let cursor;let count=0;do{const page=await list({prefix:'intake/',limit:100,cursor,token:process.env.BLOB_READ_WRITE_TOKEN});for(const obj of page.blobs){const response=await get(obj.url,{access:'private',token:process.env.BLOB_READ_WRITE_TOKEN});if(!response||!response.stream)continue;const raw=await new Response(response.stream).text();const record=JSON.parse(raw);const row={reference:record.reference,submittedAt:record.submittedAt};for(const f of fields){const v=record.answers?.[f.key];let s=Array.isArray(v)?v.join(', '):String(v??'');if(/^[=+@\-\t\r]/.test(s))s="'"+s;row[f.key]=s}ws.addRow(row);count++}cursor=page.hasMore?page.cursor:undefined}while(cursor&&count<5000);
+ const bytes=await wb.xlsx.writeBuffer();res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');res.setHeader('Content-Disposition','attachment; filename="healthcare-client-requirements.xlsx"');res.setHeader('Cache-Control','private, no-store');return res.status(200).send(Buffer.from(bytes));
+ }catch(e){console.error('Export failed',e.message);return res.status(500).json({error:'Could not export records'})}
+}
